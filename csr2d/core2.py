@@ -11,6 +11,7 @@ import scipy
 
 from numpy import abs, sin, cos, real, exp, pi, cbrt, sqrt
 
+from quantecon.optimize.root_finding import brentq
 
 
 def old_psi_s(z, x, beta):
@@ -383,14 +384,13 @@ def psi_x(z, x, beta):
     E = my_ellipeinc(alp, arg2)
     
     
-    T1 = (1/abs(x)/(1 + x) * ((2 + 2*x + x**2) * F - x**2 * E))
+    T1 = (1/abs(x)/(1 + x) * ((2 + 2*x + x**2)*F - x**2*E))
     D = kap**2 - beta2 * (1 + x)**2 * sin2a**2
-    T2 = ((kap**2 - 2*beta2 * (1+x)**2 + beta2 * (1+x) * (2 + 2*x + x**2) * cos2a)/ beta/ (1+x)/ D)
+    T2 = ((kap**2 - 2*beta2*(1+x)**2 + beta2*(1+x)*(2 + 2*x + x**2)*cos2a)/ beta/ (1+x)/ D)
     T3 = -kap * sin2a / D
     T4 = kap * beta2 * (1 + x) * sin2a * cos2a / D
     T5 = 1 / abs(x) * F # psi_phi without e/rho**2 factor
     out = (T1 + T2 + T3 + T4) - 2 / beta2 * T5
-
     
     return out
 
@@ -407,22 +407,47 @@ def psi_x0(z, x, beta, dx):
         return  psi_x(z, x, beta)
 
 
+##################################################
+### Transient fields and potentials ##############
+##################################################
 
-### Transient fields and potentials
+
+############ Case A ##############################
+
+@vectorize([float64(float64, float64, float64, float64)])
+def eta_case_A(z, x, beta2, alp):
+    """
+    Eq.(?) from Ref[1] slide 11
+    "eta" here is H/rho, not to be confused with the eta function.
+    "alp" here is half of the bending angle, not the alpha function.
+    Note that 'x' here corresponds to 'chi = x/rho', 
+    and 'z' here corresponds to 'xi = z/2/rho' in the paper. 
+    """
+    sin2a = sin(2*alp)
+    
+    a = (1-beta2)/4
+    b = alp - z - beta2*(1+x)*sin2a/2
+    c = alp**2 - 2*alp*z + z**2 - beta2*x**2/4 - beta2*(1+x)*sin(alp)**2
+    
+    return (-b + sqrt(b**2 - 4*a*c)) / (2*a)
 
 
-@vectorize([float64(float64, float64, float64, float64, float64)])
-def Es_case_A(z, x, beta, eta, alp):
+@vectorize([float64(float64, float64, float64, float64)])
+def Es_case_A(z, x, beta, alp):
     """
     Eq.(?) from Ref[2] with no constant factor e/gamma**2/rho**2.
     Note that 'x' here corresponds to 'chi = x/rho', 
     and 'z' here corresponds to 'xi = z/2/rho' in the paper. 
-    Note that eta here is H/rho, not to be confused with the eta function.
+    'alp' is half the observational angle here.
     """
-        
-    #alp = alpha(z, x, beta2)
+
+    if z == 0 and x == 0 and alp==0:
+        return 0
+    
+    beta2 = beta**2
     sin2a = sin(2*alp)
     cos2a = cos(2*alp) 
+    eta = eta_case_A(z, x, beta2, alp)
     kap = sqrt( eta**2 + x**2 + 4*(1+x)*sin(alp)**2 + 2*eta*(1+x)*sin2a) # kappa for case A
     
     N = sin2a + (eta - beta*kap)*cos2a
@@ -430,25 +455,195 @@ def Es_case_A(z, x, beta, eta, alp):
     
     return N/D**3
     
-
-@vectorize([float64(float64, float64, float64, float64, float64)])
-def Fx_case_A(z, x, beta, eta, alp):
+    
+@vectorize([float64(float64, float64, float64, float64)])
+def Fx_case_A(z, x, beta, alp):
     """
-    Eq.(?) from Ref[2] with no constant factor e/gamma**2/rho**2.
+    Eq.(?) from Ref[2] with no constant factor e**2/gamma**2/rho**2.
     Note that 'x' here corresponds to 'chi = x/rho', 
     and 'z' here corresponds to 'xi = z/2/rho' in the paper. 
-    Note that eta here is H/rho, not to be confused with the eta function.
+    'alp' is half the observational angle here.
     """
         
-    #alp = alpha(z, x, beta2)
     beta2 = beta**2
     sin2a = sin(2*alp)
     cos2a = cos(2*alp) 
-    kap = sqrt( eta**2 + x**2 + 4*(1+x)*sin(alp)**2 +2*eta*(1+x)*sin2a) # kappa for case A
+    eta = eta_case_A(z, x, beta2, alp)
+    kap = sqrt( eta**2 + x**2 + 4*(1+x)*sin(alp)**2 + 2*eta*(1+x)*sin2a) # kappa for case A
     
     N1 = (1 + beta2)*(1+x)
-    N2 = (1 + beta2*(1+x)**2)*cos2a
+    N2 = -(1 + beta2*(1+x)**2)*cos2a
     N3 = (eta - beta*kap)*sin2a
     D = kap - beta*(eta + (1+x)*sin2a)
     
     return (N1+N2+N3)/D**3
+
+
+########### Case B #################################
+########## Note that psi_s and psi_x above are also for case_B
+
+@vectorize([float64(float64, float64, float64)])
+def Es_case_B(z, x, beta):
+    """
+    Eq.(?) from Ref[2] slide #21 with no constant factor e*beta**2/rho**2.
+    Note that 'x' here corresponds to 'chi = x/rho', 
+    and 'z' here corresponds to 'xi = z/2/rho' in the paper. 
+    """
+  
+    if z == 0 and x == 0:
+        return 0
+    
+    beta2 = beta**2
+    alp = alpha(z, x, beta2)
+    sin2a = sin(2*alp)
+    cos2a = cos(2*alp) 
+
+    kap = sqrt(x**2 + 4*(1+x)*sin(alp)**2) # kappa for case B
+    
+    N1 = cos2a - (1+x)
+    N2 = (1+x)*sin2a - beta*kap
+    D = kap - beta*(1+x)*sin2a
+    
+    return N1*N2/D**3
+
+
+@vectorize([float64(float64, float64, float64, float64)], target='parallel')
+def Es_case_B0(z, x, beta, dx):
+    """
+    Same as Es_case_B, but checks for x==0, and averages over +/- dx/2
+    
+    """
+    
+   # if x == 0:
+   #     return (Es_case_B(z, -dx/2, beta) +  Es_case_B(z, dx/2, beta))/2
+    
+    if z == 0:
+        return 0
+    else:
+        return Es_case_B(z, x, beta)
+    
+
+############# Case C ####################################
+@vectorize([float64(float64, float64, float64, float64, float64)])
+def eta_case_C(z, x, beta2, alp, lamb):
+    """
+    Eq.(?) from Ref[1] slide 11
+    "eta" here is H/rho, not to be confused with the eta function.
+    "alp" here is half of the bending angle, not the alpha function.
+    "lamb" is L/rho, where L is the bunch center location down the bending exit.
+    Note that 'x' here corresponds to 'chi = x/rho', 
+    and 'z' here corresponds to 'xi = z/2/rho' in the paper. 
+    """
+    sin2a = sin(2*alp)
+    cos2a = cos(2*alp)
+    
+    a = (1-beta2)/4
+    b = alp - z + lamb/2 - lamb*beta2*cos2a/2 - beta2*(1+x)*sin2a/2
+    c = alp**2 + alp*lamb + (1-beta2)*lamb**2/4 - 2*alp*z - lamb*z + z**2 - beta2*x**2/4 - beta2*(1+x)*sin(alp)**2 - lamb*beta2*sin2a/2
+    
+    return (-b + sqrt(b**2 - 4*a*c)) / (2*a)
+
+
+@vectorize([float64(float64, float64, float64, float64, float64)])
+def Es_case_C(z, x, beta, alp, lamb):
+    """
+    Eq.(?) from Ref[2] with no constant factor e/gamma**2/rho**2.
+    Note that 'x' here corresponds to 'chi = x/rho', 
+    and 'z' here corresponds to 'xi = z/2/rho' in the paper. 
+    'alp' is half the observational angle here.
+    """
+
+    if z == 0 and x == 0 and alp == 0:
+        return 0
+    
+    beta2 = beta**2
+    sin2a = sin(2*alp)
+    cos2a = cos(2*alp) 
+    eta = eta_case_C(z, x, beta2, alp, lamb)
+    kap = sqrt( lamb**2 + eta**2 + x**2 + 4*(1+x)*sin(alp)**2 + 2*(lamb + eta*(1+x))*sin2a + 2*lamb*eta*cos2a) # kappa for case C
+    
+    N = lamb + sin2a + (eta - beta*kap)*cos2a
+    D = kap - beta*(eta + lamb*cos2a + (1+x)*sin2a)
+    
+    return N/D**3
+
+
+@vectorize([float64(float64, float64, float64, float64, float64)])
+def Fx_case_C(z, x, beta, alp, lamb):
+    """
+    Eq.(?) from Ref[2] with no constant factor e**2/gamma**2/rho**2.
+    Note that 'x' here corresponds to 'chi = x/rho', 
+    and 'z' here corresponds to 'xi = z/2/rho' in the paper. 
+    'alp' is half the observational angle here.
+    """
+        
+    beta2 = beta**2
+    sin2a = sin(2*alp)
+    cos2a = cos(2*alp) 
+    eta = eta_case_C(z, x, beta2, alp, lamb)
+    kap = sqrt( lamb**2 + eta**2 + x**2 + 4*(1+x)*sin(alp)**2 + 2*(lamb + eta*(1+x))*sin2a + 2*lamb*eta*cos2a) # kappa for case C
+    
+    N1 = (1 + beta2)*(1+x)
+    N2 = -(1 + beta2*(1+x)**2)*cos2a
+    N3 = (eta - beta*kap + beta2*lamb*(1+x))*sin2a
+    D = kap - beta*(eta + lamb*cos2a + (1+x)*sin2a)
+    
+    return (N1+N2+N3)/D**3
+
+
+############################### Case D #################################
+
+@np.vectorize
+def alpha_exact_case_D(z, x, beta, lamb):
+    """
+    Exact alpha calculation using numerical root finding.
+
+    """
+    #beta = np.sqrt(beta2)
+    f = lambda a: a + 1/2 * (lamb - beta*sqrt(lamb**2 + x**2 + 4*(1+x)*sin(a)**2 + 2*lamb*sin(2*a)) - z)
+    
+    res = scipy.optimize.root_scalar(f, bracket=(-1,1))
+    
+    return res.root
+
+@njit
+def f_root_case_D(a, z, x, beta, lamb):
+    return a + 1/2 * (lamb - beta* sqrt(lamb**2 + x**2 + 4*(1+x)*sin(a)**2 + 2*lamb*sin(2*a)) - z)
+
+
+#@vectorize([float64(float64, float64, float64, float64)], target='parallel')
+@vectorize([float64(float64, float64, float64, float64)])
+def alpha_exact_case_D_brentq(z, x, beta, lamb):
+    """
+    Exact alpha calculation for case D using numerical Brent's method of root finding.
+
+    """
+    #return brentq(ff, -0.01, 0.1, args=(z, x, beta, lamb))[0]
+    return brentq(f_root_case_D, -1, 1, args=(z, x, beta, lamb))[0]
+
+
+#@vectorize([float64(float64, float64, float64, float64)])
+#@np.vectorize
+@vectorize([float64(float64, float64, float64, float64)])
+def Es_case_D(z, x, beta, lamb):
+    """
+    Eq.(?) from Ref[2] slide #21 with no constant factor e*beta**2/rho**2.
+    Note that 'x' here corresponds to 'chi = x/rho', 
+    and 'z' here corresponds to 'xi = z/2/rho' in the paper. 
+    """
+  
+    if z == 0 and x == 0:
+        return 0
+    
+    #alp = alpha_exact_case_D(z, x, beta, lamb)  # old method
+    alp = alpha_exact_case_D_brentq(z, x, beta, lamb)
+    sin2a = sin(2*alp)
+    cos2a = cos(2*alp) 
+
+    kap = sqrt(lamb**2 + x**2 + 4*(1+x)*sin(alp)**2 + 2*lamb*sin(2*alp)) # kappa for case D
+    
+    N1 = cos2a - (1+x)
+    N2 = lamb*cos2a + (1+x)*sin2a - beta*kap
+    D = kap - beta*(lamb*cos2a + (1+x)*sin2a)
+    
+    return N1*N2/D**3
