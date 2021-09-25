@@ -283,7 +283,6 @@ def f_root_case_B(a, z, x, beta):
     return a - beta/2 * sqrt(x**2 + 4*(1+x)*sin(a)**2) - z
 
 
-#@vectorize([float64(float64, float64, float64, float64)], target='parallel')
 @vectorize([float64(float64, float64, float64)])
 def alpha_exact_case_B_brentq(z, x, beta):
     """
@@ -294,7 +293,6 @@ def alpha_exact_case_B_brentq(z, x, beta):
     
     #return brentq(ff, -0.01, 0.1, args=(z, x, beta, lamb))[0]
     return brentq(f_root_case_B, -0.5, 1, args=(z, x, beta))[0]
-
 
 
 @vectorize([float64(float64, float64, float64)])
@@ -345,7 +343,7 @@ def alpha(z, x, beta2):
 
 
 @vectorize([float64(float64, float64, float64)], target='parallel')
-def psi_s(z, x, beta):
+def psi_s(z, x, gamma):
     """
     2D longitudinal potential
     
@@ -359,44 +357,23 @@ def psi_s(z, x, beta):
     if z == 0 and x == 0:
         return 0
     
-    beta2 = beta**2
+    beta2 = 1-1/gamma**2
+    beta = sqrt(beta2)
     
     alp = alpha(z, x, beta2)  # Use approximate quatic formulas
     #alp = alpha_exact_case_B_brentq(z, x, beta) # Use numerical root finder    
     
-    kap = sqrt(x**2 + 4*(1+x) * sin(alp)**2)
+    kap = 2*(alp - z)/beta # Simpler form of kappa
+    #kap = sqrt(x**2 + 4*(1+x) * sin(alp)**2)
     
-    out = (cos(2*alp)- 1/(1+x)) / (kap - beta * (1+x) * sin(2*alp))   
-
+    out = (cos(2*alp)- 1/(1+x)) / (kap - beta * (1+x) * sin(2*alp))    
+    
+    # Add SC term
+    out += -1 / (  (gamma**2-1)*(1+x)*(kap - beta*(1+x)*sin(2*alp))  )    
+        
     return out
 
 
-
-@vectorize([float64(float64, float64, float64)], target='parallel')
-def psi_s_SC(z, x, beta):
-    """
-    2D longitudinal potential ( space charge term )
-    
-    Numba vectorized
-    
-    Eq. (B7) Psi_s(SC) from Ref[1] with no constant factor (e/2/rho**2/gamma**2).
-    Ref[1]: Y. Cai and Yuantao. Ding, PRAB 23, 014402 (2020).
-    Note that 'x' here corresponds to 'chi = x / rho' in the paper.
-    """
-    
-    if z == 0 and x == 0:
-        return 0
-    
-    beta2 = beta**2
-    
-    #alp = alpha(z, x, beta2)  # Use approximate quatic formulas
-    alp = alpha_exact_case_B_brentq(z, x, beta) # Use numerical root finder    
-    
-    kap = sqrt(x**2 + 4*(1+x) * sin(alp)**2)
-    
-    out = -1 / (1+x) / (kap - beta * (1+x) * sin(2*alp))   
-
-    return out
 
 
 # Include special functions for Numba
@@ -411,10 +388,63 @@ my_ellipkinc = functype(addr1)
 my_ellipeinc = functype(addr2)
 
 
+
+
 @vectorize([float64(float64, float64, float64)])
-def psi_x_hat(z, x, beta):
+def psi_x(z, x, gamma):
     """
-    2D horizontal potential ( "psi_phi" term included ) 
+    2D longitudinal potential ( "psi_phi" term excluded ) 
+    
+    Numba vectorized    
+
+    Eq.(24) from Ref[1] with argument zeta=0 and no constant factor e*beta**2/2/rho**2.
+    Note that 'x' here corresponds to 'chi = x/rho', 
+    and 'z' here corresponds to 'xi = z/2/rho' in the paper. 
+    """
+    
+    beta2 = 1-1/gamma**2
+    beta = sqrt(beta2)
+        
+    alp = alpha(z, x, beta2)  # Use approximate quatic formulas
+    #alp = alpha_exact_case_B_brentq(z, x, beta) # Use numerical root finder
+    
+    kap = 2*(alp - z)/beta 
+    # kap = sqrt(x**2 + 4*(1+x) * sin(alp)**2) # kappa(z, x, beta2) inline
+    
+    sin2a = sin(2*alp)
+    cos2a = cos(2*alp)    
+    
+    arg2 = -4 * (1+x) / x**2
+    F = my_ellipkinc(alp, arg2) 
+    E = my_ellipeinc(alp, arg2)
+    
+    T1 = (1/abs(x)/(1 + x) * ((2 + 2*x + x**2)*F - x**2*E))
+    D = kap**2 - beta2 * (1 + x)**2 * sin2a**2
+    T2 = ((kap**2 - 2*beta2*(1+x)**2 + beta2*(1+x)*(2 + 2*x + x**2)*cos2a)/ beta/ (1+x)/ D)
+    T3 = -kap * sin2a / D
+    T4 = kap * beta2 * (1 + x) * sin2a * cos2a / D
+    
+    out = (T1 + T2 + T3 + T4)
+    
+    return out
+
+
+@vectorize([float64(float64, float64, float64, float64)], target='parallel')
+def psi_x0(z, x, gamma, dx):
+    """
+    Same as psi_x, but checks for x==0, and averages over +/- dx/2
+    """
+    
+    if x == 0:
+        return (psi_x(z, -dx/2, gamma) +  psi_x(z, dx/2, gamma))/2
+    else:
+        return  psi_x(z, x, gamma)
+
+
+@vectorize([float64(float64, float64, float64)])
+def psi_x_hat(z, x, gamma):
+    """
+    2D horizontal potential ( "psi_phi" term INCLUDED. ) 
     
     Numba vectorized
     
@@ -423,12 +453,14 @@ def psi_x_hat(z, x, beta):
     and 'z' here corresponds to 'xi = z/2/rho' in the paper. 
     """
     
-    beta2 = beta**2
+    beta2 = 1-1/gamma**2
+    beta = sqrt(beta2)
         
     alp = alpha(z, x, beta2)  # Use approximate quatic formulas
     #alp = alpha_exact_case_B_brentq(z, x, beta) # Use numerical root finder
     
-    kap = sqrt(x**2 + 4*(1+x) * sin(alp)**2) # kappa(z, x, beta2) inline
+    kap = 2*(alp - z)/beta 
+    #kap = sqrt(x**2 + 4*(1+x) * sin(alp)**2) # kappa(z, x, beta2) inline
     
     sin2a = sin(2*alp)
     cos2a = cos(2*alp)    
@@ -448,108 +480,22 @@ def psi_x_hat(z, x, beta):
     
     return out
 
-
-@vectorize([float64(float64, float64, float64)])
-def psi_x(z, x, beta):
-    """
-    2D longitudinal potential ( "psi_phi" term excluded ) 
-    
-    Numba vectorized    
-
-    Eq.(24) from Ref[1] with argument zeta=0 and no constant factor e*beta**2/2/rho**2.
-    Note that 'x' here corresponds to 'chi = x/rho', 
-    and 'z' here corresponds to 'xi = z/2/rho' in the paper. 
-    """
-    
-    beta2 = beta**2
-        
-    alp = alpha(z, x, beta2)  # Use approximate quatic formulas
-    #alp = alpha_exact_case_B_brentq(z, x, beta) # Use numerical root finder
-    
-    kap = sqrt(x**2 + 4*(1+x) * sin(alp)**2) # kappa(z, x, beta2) inline
-    
-    sin2a = sin(2*alp)
-    cos2a = cos(2*alp)    
-    
-    arg2 = -4 * (1+x) / x**2
-    F = my_ellipkinc(alp, arg2) 
-    E = my_ellipeinc(alp, arg2)
-    
-    T1 = (1/abs(x)/(1 + x) * ((2 + 2*x + x**2)*F - x**2*E))
-    D = kap**2 - beta2 * (1 + x)**2 * sin2a**2
-    T2 = ((kap**2 - 2*beta2*(1+x)**2 + beta2*(1+x)*(2 + 2*x + x**2)*cos2a)/ beta/ (1+x)/ D)
-    T3 = -kap * sin2a / D
-    T4 = kap * beta2 * (1 + x) * sin2a * cos2a / D
-    
-    out = (T1 + T2 + T3 + T4)
-    
-    return out
-
-@vectorize([float64(float64, float64, float64)])
-def psi_x_exact(z, x, beta):
-    """
-    2D longitudinal potential ( "psi_phi" term excluded ) 
-    
-    Numba vectorized        
-
-    Eq.(24) from Ref[1] with argument zeta=0 and no constant factor e*beta**2/2/rho**2.
-    Note that 'x' here corresponds to 'chi = x/rho', 
-    and 'z' here corresponds to 'xi = z/2/rho' in the paper. 
-    """
-    
-    beta2 = beta**2
-        
-    #alp = alpha(z, x, beta2)  # Use approximate quatic formulas
-    alp = alpha_exact_case_B_brentq(z, x, beta) # Use numerical root finder
-    
-    kap = sqrt(x**2 + 4*(1+x) * sin(alp)**2) # kappa(z, x, beta2) inline
-    
-    sin2a = sin(2*alp)
-    cos2a = cos(2*alp)    
-    
-    arg2 = -4 * (1+x) / x**2
-    F = my_ellipkinc(alp, arg2) 
-    E = my_ellipeinc(alp, arg2)
-    
-    T1 = (1/abs(x)/(1 + x) * ((2 + 2*x + x**2)*F - x**2*E))
-    D = kap**2 - beta2 * (1 + x)**2 * sin2a**2
-    T2 = ((kap**2 - 2*beta2*(1+x)**2 + beta2*(1+x)*(2 + 2*x + x**2)*cos2a)/ beta/ (1+x)/ D)
-    T3 = -kap * sin2a / D
-    T4 = kap * beta2 * (1 + x) * sin2a * cos2a / D
-
-    out = (T1 + T2 + T3 + T4) 
-    
-    return out
-
-
 @vectorize([float64(float64, float64, float64, float64)], target='parallel')
-def psi_x0(z, x, beta, dx):
-    """
-    Same as psi_x, but checks for x==0, and averages over +/- dx/2
-    """
-    
-    if x == 0:
-        return (psi_x(z, -dx/2, beta) +  psi_x(z, dx/2, beta))/2
-    else:
-        return  psi_x(z, x, beta)
-
-
-@vectorize([float64(float64, float64, float64, float64)], target='parallel')
-def psi_x0_hat(z, x, beta, dx):
+def psi_x0_hat(z, x, gamma, dx):
     """
     Same as psi_x_hat, but checks for x==0, and averages over +/- dx/2
     """
     
     if x == 0:
-        return (psi_x_hat(z, -dx/2, beta) +  psi_x_hat(z, dx/2, beta))/2
+        return (psi_x_hat(z, -dx/2, gamma) +  psi_x_hat(z, dx/2, gamma))/2
     else:
-        return psi_x_hat(z, x, beta)
+        return psi_x_hat(z, x, gamma)
 
     
 @vectorize([float64(float64, float64, float64)])
-def psi_x_SC(z, x, beta):
+def psi_x_SC(z, x, gamma):
     """
-    2D longitudinal potential ( space charge term ) 
+    2D longitudinal potential ( space charge term ONLY ) 
     
     Numba vectorized    
     
@@ -558,12 +504,14 @@ def psi_x_SC(z, x, beta):
     and 'z' here corresponds to 'xi = z/2/rho' in the paper. 
     """
     
-    beta2 = beta**2
+    beta2 = 1-1/gamma**2
+    beta = sqrt(beta2)
         
     alp = alpha(z, x, beta2)  # Use approximate quatic formulas
     #alp = alpha_exact_case_B_brentq(z, x, beta) # Use numerical root finder
     
-    kap = sqrt(x**2 + 4*(1+x) * sin(alp)**2) # kappa(z, x, beta2) inline
+    kap = 2*(alp - z)/beta 
+    #kap = sqrt(x**2 + 4*(1+x) * sin(alp)**2) 
     
     sin2a = sin(2*alp)
     cos2a = cos(2*alp)    
@@ -586,15 +534,15 @@ def psi_x_SC(z, x, beta):
     return out    
 
 @vectorize([float64(float64, float64, float64, float64)], target='parallel')
-def psi_x0_SC(z, x, beta, dx):
+def psi_x0_SC(z, x, gamma, dx):
     """
     Same as psi_x_SC, but checks for x==0, and averages over +/- dx/2
     """
     
     if x == 0:
-        return (psi_x_SC(z, -dx/2, beta) +  psi_x_SC(z, dx/2, beta))/2
+        return (psi_x_SC(z, -dx/2, gamma) +  psi_x_SC(z, dx/2, gamma))/2
     else:
-        return psi_x_SC(z, x, beta)
+        return psi_x_SC(z, x, gamma)
     
 ##################################################
 ### Transient fields and potentials ##############
@@ -622,7 +570,7 @@ def eta_case_A(z, x, beta2, alp):
 
 
 @vectorize([float64(float64, float64, float64, float64)])
-def Es_case_A(z, x, beta, alp):
+def Es_case_A(z, x, gamma, alp):
     """
     Eq.(?) from Ref[2] with no constant factor e/gamma**2/rho**2.
     Note that 'x' here corresponds to 'chi = x/rho', 
@@ -633,11 +581,15 @@ def Es_case_A(z, x, beta, alp):
     if z == 0 and x == 0 and alp==0:
         return 0
     
-    beta2 = beta**2
+    beta2 = 1-1/gamma**2
+    beta = sqrt(beta2)
+    
     sin2a = sin(2*alp)
     cos2a = cos(2*alp) 
+    
     eta = eta_case_A(z, x, beta2, alp)
-    kap = sqrt( eta**2 + x**2 + 4*(1+x)*sin(alp)**2 + 2*eta*(1+x)*sin2a) # kappa for case A
+    kap = (2*(alp - z) + eta)/beta   # kappa for case A
+    #kap = sqrt( eta**2 + x**2 + 4*(1+x)*sin(alp)**2 + 2*eta*(1+x)*sin2a) 
     
     N = sin2a + (eta - beta*kap)*cos2a
     D = kap - beta*(eta + (1+x)*sin2a)
@@ -646,35 +598,47 @@ def Es_case_A(z, x, beta, alp):
     
     
 @vectorize([float64(float64, float64, float64, float64)])
-def Fx_case_A(z, x, beta, alp):
+def Fx_case_A(z, x, gamma, alp):
     """
+    (1+x) correction for Ex included.
     Eq.(?) from Ref[2] with no constant factor e**2/gamma**2/rho**2.
     Note that 'x' here corresponds to 'chi = x/rho', 
     and 'z' here corresponds to 'xi = z/2/rho' in the paper. 
     'alp' is half the observational angle here.
     """
         
-    beta2 = beta**2
+    beta2 = 1-1/gamma**2
+    beta = sqrt(beta2)
+    
     sin2a = sin(2*alp)
     cos2a = cos(2*alp) 
-    eta = eta_case_A(z, x, beta2, alp)
-    kap = sqrt( eta**2 + x**2 + 4*(1+x)*sin(alp)**2 + 2*eta*(1+x)*sin2a) # kappa for case A
     
-    N1 = (1 + beta2)*(1+x)
-    N2 = -(1 + beta2*(1+x)**2)*cos2a
-    N3 = (eta - beta*kap)*sin2a
+    eta = eta_case_A(z, x, beta2, alp)
+    kap = (2*(alp - z) + eta)/beta  # kappa for case A
+    #kap = sqrt( eta**2 + x**2 + 4*(1+x)*sin(alp)**2 + 2*eta*(1+x)*sin2a) 
+    
+    # Yunhai's version
+    #N1 = (1 + beta2)*(1+x)
+    #N2 = -(1 + beta2*(1+x)**2)*cos2a
+    #N3 = (eta - beta*kap)*sin2a
+    #return (N1+N2+N3)/D**3
+    
+    N_Ex = 1+x - cos2a + (eta - beta*kap)*sin2a
+    N_By = beta*( (1+x)*cos2a - 1 )
+    
     D = kap - beta*(eta + (1+x)*sin2a)
     
-    return (N1+N2+N3)/D**3
+    return (1+x)*(N_Ex - beta*N_By)/D**3
 
 
 ########### Case B #################################
 ########## Note that psi_s and psi_x above are also for case_B
 
 
-@vectorize([float64(float64, float64, float64)], target='parallel')
-def Es_case_B(z, x, beta):
+@vectorize([float64(float64, float64, float64)])
+def Es_case_B(z, x, gamma):
     """
+    SC term included.
     Eq.(9) from Ref[1] with zeta set to zero, and no constant factor e*beta**2/rho**2.
     Note that 'x' here corresponds to 'chi = x/rho', 
     and 'z' here corresponds to 'xi = z/2/rho' in the paper. 
@@ -683,23 +647,32 @@ def Es_case_B(z, x, beta):
     if z == 0 and x == 0:
         return 0
     
-    beta2 = beta**2
+    beta2 = 1-1/gamma**2
+    beta = sqrt(beta2)
+    
     alp = alpha(z, x, beta2)
     sin2a = sin(2*alp)
     cos2a = cos(2*alp) 
 
-    kap = sqrt(x**2 + 4*(1+x)*sin(alp)**2) # kappa for case B
+    kap = 2*(alp - z)/beta
+    #kap = sqrt(x**2 + 4*(1+x)*sin(alp)**2) # kappa for case B
     
     N1 = cos2a - (1+x)
     N2 = (1+x)*sin2a - beta*kap
     D = kap - beta*(1+x)*sin2a
     
-    return N1*N2/D**3
+    # SC term with prefactor 1/(gamma*beta)^2 = 1/(gamma^2-1)
+    NSC = (sin2a - beta*kap *cos2a)/ (gamma**2-1) 
+    
+    # return (N1*N2)/D**3
+    return (N1*N2 + NSC)/D**3
 
 
 @vectorize([float64(float64, float64, float64)], target='parallel')
-def Fx_case_B(z, x, beta):
+def Fx_case_B(z, x, gamma):
     """
+    INCORRECT ( missing a (1+x) for the Es term ).
+    SC term NOT included.
     Eq.(17) from Ref[1] with zeta set to zero, and no constant factor e*beta**2/rho**2.
     Note that 'x' here corresponds to 'chi = x/rho', 
     and 'z' here corresponds to 'xi = z/2/rho' in the paper. 
@@ -708,12 +681,15 @@ def Fx_case_B(z, x, beta):
     if z == 0 and x == 0:
         return 0
     
-    beta2 = beta**2
+    beta2 = 1-1/gamma**2
+    beta = sqrt(beta2)
+    
     alp = alpha(z, x, beta2)
     sin2a = sin(2*alp)
     cos2a = cos(2*alp) 
 
-    kap = sqrt(x**2 + 4*(1+x)*sin(alp)**2) # kappa for case B
+    kap = 2*(alp - z)/beta
+    #kap = sqrt(x**2 + 4*(1+x)*sin(alp)**2) # kappa for case B
     
     N1 = sin2a - beta*(1+x)*kap
     N2 = (1+x)*sin2a - beta*kap
@@ -721,39 +697,14 @@ def Fx_case_B(z, x, beta):
     
     return N1*N2/D**3
 
-@vectorize([float64(float64, float64, float64)], target='parallel')
-def Fx_case_B_Chris_NO_SC(z, x, beta):
-    """
-    CHRIS VERSION WITH NO (1+x) in the first term.
-    The SC term is also included for benchmarking with LW3D.
-    Eq.(17) from Ref[1] with zeta set to zero, and no constant factor e*beta**2/rho**2.
-    Note that 'x' here corresponds to 'chi = x/rho', 
-    and 'z' here corresponds to 'xi = z/2/rho' in the paper. 
-    """
-  
-    if z == 0 and x == 0:
-        return 0
-    
-    beta2 = beta**2
-    alp = alpha(z, x, beta2)
-    sin2a = sin(2*alp)
-    cos2a = cos(2*alp) 
-
-    kap = sqrt(x**2 + 4*(1+x)*sin(alp)**2) # kappa for case B
-    
-    N1 = sin2a - beta*kap
-    N2 = (1+x)*sin2a - beta*kap
-    D = kap - beta*(1+x)*sin2a
-    
-    return (1+x)*(N1*N2 )/D**3
 
 
 #@vectorize([float64(float64, float64, float64)], target='parallel')
 @vectorize([float64(float64, float64, float64)])
-def Fx_case_B_Chris(z, x, beta):
+def Fx_case_B_Chris(z, x, gamma):
     """
-    CHRIS VERSION WITH NO (1+x) in the first term.
-    The SC term is also included for benchmarking with LW3D.
+    CHRIS VERSION WITH an EXTRA (1+x) in the first term.
+    The SC term INCLUDED,
     Eq.(17) from Ref[1] with zeta set to zero, and no constant factor e*beta**2/rho**2.
     Note that 'x' here corresponds to 'chi = x/rho', 
     and 'z' here corresponds to 'xi = z/2/rho' in the paper. 
@@ -762,26 +713,24 @@ def Fx_case_B_Chris(z, x, beta):
     if z == 0 and x == 0:
         return 0
     
-    beta2 = beta**2
+    beta2 = 1-1/gamma**2
+    beta = sqrt(beta2)
+    
     alp = alpha(z, x, beta2)
     sin2a = sin(2*alp)
     cos2a = cos(2*alp) 
 
-    kap = sqrt(x**2 + 4*(1+x)*sin(alp)**2) # kappa for case B
+    kap = 2*(alp - z)/beta
+    #kap = sqrt(x**2 + 4*(1+x)*sin(alp)**2) # kappa for case B
     
     N1 = sin2a - beta*kap
     N2 = (1+x)*sin2a - beta*kap
     D = kap - beta*(1+x)*sin2a
     
-    #return (1+x)*(N1*N2 )/D**3
+    # return (1+x)*(N1*N2 )/D**3
 
-    # Acceleration term only
-    # Fx_acc = (1+x)*(N1*N2 )/D**3
-
-    # Velocity term
-    # with prefactor 1/(gamma*beta)^2 = 1/(gamma^2-1)
-    gamma2 = 1/(1 - beta2)
-    NSC = (1 + beta2 - beta*kap*sin2a + x - cos2a*(1 + beta2*(1 + x)) ) / (gamma2-1) 
+    # SC term with prefactor 1/(gamma*beta)^2 = 1/(gamma^2-1)
+    NSC = (1 + beta2 - beta*kap*sin2a + x - cos2a*(1 + beta2*(1 + x)) ) / (gamma**2-1) 
 
     # Total force
     Fx_total =  (1+x)*(N1*N2 + NSC)/D**3
@@ -810,7 +759,7 @@ def eta_case_C(z, x, beta2, alp, lamb):
 
 
 @vectorize([float64(float64, float64, float64, float64, float64)])
-def Es_case_C(z, x, beta, alp, lamb):
+def Es_case_C(z, x, gamma, alp, lamb):
     """
     Eq.(?) from Ref[2] with no constant factor e/gamma**2/rho**2.
     Note that 'x' here corresponds to 'chi = x/rho', 
@@ -821,11 +770,15 @@ def Es_case_C(z, x, beta, alp, lamb):
     if z == 0 and x == 0 and alp == 0:
         return 0
     
-    beta2 = beta**2
+    beta2 = 1-1/gamma**2
+    beta = sqrt(beta2)
+    
     sin2a = sin(2*alp)
     cos2a = cos(2*alp) 
     eta = eta_case_C(z, x, beta2, alp, lamb)
-    kap = sqrt( lamb**2 + eta**2 + x**2 + 4*(1+x)*sin(alp)**2 + 2*(lamb + eta*(1+x))*sin2a + 2*lamb*eta*cos2a) # kappa for case C
+    
+    kap = (2*(alp - z) + eta + lamb)/beta # kappa for case C
+    #kap = sqrt( lamb**2 + eta**2 + x**2 + 4*(1+x)*sin(alp)**2 + 2*(lamb + eta*(1+x))*sin2a + 2*lamb*eta*cos2a) 
     
     N = lamb + sin2a + (eta - beta*kap)*cos2a
     D = kap - beta*(eta + lamb*cos2a + (1+x)*sin2a)
@@ -834,26 +787,36 @@ def Es_case_C(z, x, beta, alp, lamb):
 
 
 @vectorize([float64(float64, float64, float64, float64, float64)])
-def Fx_case_C(z, x, beta, alp, lamb):
+def Fx_case_C(z, x, gamma, alp, lamb):
     """
+    (1+x) correction for Ex included.
     Eq.(?) from Ref[2] with no constant factor e**2/gamma**2/rho**2.
     Note that 'x' here corresponds to 'chi = x/rho', 
     and 'z' here corresponds to 'xi = z/2/rho' in the paper. 
     'alp' is half the observational angle here.
     """
-        
-    beta2 = beta**2
+    
+    beta2 = 1-1/gamma**2
+    beta = sqrt(beta2)
+    
     sin2a = sin(2*alp)
     cos2a = cos(2*alp) 
     eta = eta_case_C(z, x, beta2, alp, lamb)
-    kap = sqrt( lamb**2 + eta**2 + x**2 + 4*(1+x)*sin(alp)**2 + 2*(lamb + eta*(1+x))*sin2a + 2*lamb*eta*cos2a) # kappa for case C
+    kap = (2*(alp - z) + eta + lamb)/beta # kappa for case C
+    #kap = sqrt( lamb**2 + eta**2 + x**2 + 4*(1+x)*sin(alp)**2 + 2*(lamb + eta*(1+x))*sin2a + 2*lamb*eta*cos2a)
     
-    N1 = (1 + beta2)*(1+x)
-    N2 = -(1 + beta2*(1+x)**2)*cos2a
-    N3 = (eta - beta*kap + beta2*lamb*(1+x))*sin2a
+    #N1 = (1 + beta2)*(1+x)
+    #N2 = -(1 + beta2*(1+x)**2)*cos2a
+    #N3 = (eta - beta*kap + beta2*lamb*(1+x))*sin2a
+    #return (N1+N2+N3)/D**3
+
+    N_Ex = 1+x - cos2a + (eta - beta*kap)*sin2a
+    N_By = beta*( (1+x)*cos2a - 1 - lamb*sin2a )
+    
     D = kap - beta*(eta + lamb*cos2a + (1+x)*sin2a)
     
-    return (N1+N2+N3)/D**3
+    return (1+x)*(N_Ex - beta*N_By)/D**3
+    
 
 
 ############################### Case D #################################
@@ -890,7 +853,7 @@ def alpha_exact_case_D_brentq(z, x, beta, lamb):
 #@vectorize([float64(float64, float64, float64, float64)])
 #@np.vectorize
 @vectorize([float64(float64, float64, float64, float64)])
-def Es_case_D(z, x, beta, lamb):
+def Es_case_D(z, x, gamma, lamb):
     """
     Eq.(?) from Ref[2] slide #21 with no constant factor e*beta**2/rho**2.
     Note that 'x' here corresponds to 'chi = x/rho', 
@@ -899,16 +862,53 @@ def Es_case_D(z, x, beta, lamb):
   
     if z == 0 and x == 0:
         return 0
+
+    beta2 = 1-1/gamma**2
+    beta = sqrt(beta2)
     
     #alp = alpha_exact_case_D(z, x, beta, lamb)  # old method
     alp = alpha_exact_case_D_brentq(z, x, beta, lamb)
     sin2a = sin(2*alp)
     cos2a = cos(2*alp) 
-
-    kap = sqrt(lamb**2 + x**2 + 4*(1+x)*sin(alp)**2 + 2*lamb*sin(2*alp)) # kappa for case D
+    
+    kap = (2*(alp - z) + lamb)/beta # kappa for case D
+    # kap = sqrt(lamb**2 + x**2 + 4*(1+x)*sin(alp)**2 + 2*lamb*sin(2*alp)) 
     
     N1 = cos2a - (1+x)
     N2 = lamb*cos2a + (1+x)*sin2a - beta*kap
     D = kap - beta*(lamb*cos2a + (1+x)*sin2a)
     
     return N1*N2/D**3
+
+
+@vectorize([float64(float64, float64, float64, float64)])
+def Fx_case_D(z, x, gamma, lamb):
+    """
+    (1+x) correction included
+    Eq.(17) from Ref[1] with zeta set to zero, and no constant factor e*beta**2/rho**2.
+    Note that 'x' here corresponds to 'chi = x/rho', 
+    and 'z' here corresponds to 'xi = z/2/rho' in the paper. 
+    """
+  
+    if z == 0 and x == 0:
+        return 0
+    
+    beta2 = 1-1/gamma**2
+    beta = sqrt(beta2)
+    
+    alp = alpha(z, x, beta2)
+    sin2a = sin(2*alp)
+    cos2a = cos(2*alp) 
+
+    kap = (2*(alp - z) + lamb)/beta # kappa for case D
+    
+    # SC term with prefactor 1/(gamma*beta)^2 = 1/(gamma^2-1)
+    #NSC = (1 + beta2 - beta*kap*sin2a + x - cos2a*(1 + beta2*(1 + x)) ) / (gamma**2-1) 
+
+
+    N_Ex = (lamb + sin2a) * (lamb*cos2a + (1+x)*sin2a - beta*kap)
+    N_By = kap * (lamb*cos2a + (1+x)*sin2a - beta*kap)
+    
+    D = kap - beta*(lamb*cos2a + (1+x)*sin2a)
+    
+    return (1+x)*(N_Ex - beta*N_By)/D**3
